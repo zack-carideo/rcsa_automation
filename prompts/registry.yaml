@@ -1,0 +1,11 @@
+# prompts/registry.yaml
+prompts:
+  control_description_qc:
+    file: rcsa//control_description_qc.yaml
+    owner: internal_audit_team
+  build_ppt:
+    file: presentation/build_ppt.yaml
+    owner: analytics_coe_team
+  e2e:
+    file: rcsa//e2e.yaml
+    owner: ai_team

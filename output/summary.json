@@ -1,0 +1,16 @@
+{
+  "total": 2,
+  "passed": 0,
+  "failed": 2,
+  "pass_rate": "0%",
+  "details": [
+    {
+      "control": "a leash is used to restrain the dog when outside to prevent it from running away",
+      "assessment": "DOES NOT MEET"
+    },
+    {
+      "control": "On an ongoing, continuous basis, the Access Management team in coordination with",
+      "assessment": "DOES NOT MEET"
+    }
+  ]
+}

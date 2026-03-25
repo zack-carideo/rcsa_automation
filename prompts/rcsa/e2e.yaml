@@ -14,12 +14,15 @@ bad_control_example: |
   with approved limits. WSS provides limit guidelines, and traders should review them before entering trades. 
   If a trade breaches limits, traders must investigate and resolve the issue."  
 qc_standards: |
-    1. Who      — Responsible party or system
-    2. What     — Brief description of the control action (Review, Approve,Authenticate, etc.); exclude unrelated process steps
-    3. When     — Execution timing or frequency
-    4. How      — How the control mitigates risk and actions taken on exceptions(research, resolution, escalation)
+  The control description must be clear and concise to understand the control activity performed and executed. A control is different than a process step. If an activity does not mitigate a risk, then it is not a control. 
+  Every control description must explicitly address all below qc standards to fully meet requirements. 
+
+    1. Who      — Responsible party or system that performs the control activity 
+    2. What     — Brief description of the control activity being performed (Review, Approve, Authenticate, etc.); exclude unrelated process steps
+    3. When     — Execution timing or frequency (ex. monthly, multiple times a day, for every transaction, etc.)
+    4. How      — How the control mitigates risk and actions taken on exceptions (research, resolution, escalation)
     5. Why      — Why the risk is being mitigated
-    6. Evidence — Documentation or system evidence and storage location
+    6. Evidence — Documentation or system evidence produced by the control execution. 
 system: |
   You are an Internal Auditor at a top US bank performing Quality Control (QC)
   on Risk and Control Self Assessment (RCSA) control descriptions.
@@ -44,10 +47,8 @@ system: |
   <bad_control_example> for style and structure guidance.
 
   ## QC Standards
-
-  Every control description must explicitly address all qc standards to fully meet requirements. 
-  Each standard should be evaluated independently.
   The standards to evaluate will be provided in the <qc_standards>
+  Each standard should be evaluated independently.
 
   ## Good Control Example
 

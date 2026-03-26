@@ -705,11 +705,19 @@ _HTML_TEMPLATE = """
                font-family:var(--mono)}}
   table.stats thead tr{{background:#f0f3fa}}
   table.stats th{{padding:7px 10px;text-align:left;white-space:nowrap;
-                  font-weight:600;border-bottom:2px solid var(--border)}}
+                  font-weight:600;border-bottom:2px solid var(--border);
+                  cursor:pointer;user-select:none;position:relative}}
+  table.stats th:hover{{background:#e4e9f5}}
+  table.stats th::after{{content:'';display:inline-block;margin-left:5px;
+                         opacity:0.35;font-size:10px}}
+  table.stats th.sort-asc::after{{content:'▲';opacity:1;color:var(--accent)}}
+  table.stats th.sort-desc::after{{content:'▼';opacity:1;color:var(--accent)}}
+  table.stats th:not(.sort-asc):not(.sort-desc):hover::after{{content:'⇅';opacity:0.5}}
   table.stats td{{padding:6px 10px;border-bottom:1px solid #f0f0f0;
                   white-space:nowrap;max-width:260px;overflow:hidden;
                   text-overflow:ellipsis}}
   table.stats tr:hover td{{background:#f7f8fc}}
+  .sort-hint{{font-size:.75rem;color:var(--muted);margin-bottom:8px}}
   .pill{{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500}}
   .pill-numeric{{background:#dbeafe;color:#1d4ed8}}
   .pill-categorical{{background:#dcfce7;color:#15803d}}
@@ -783,6 +791,7 @@ _HTML_TEMPLATE = """
 <div class="section active" id="s-overview">
   <div class="card">
     <h2>Column profile summary</h2>
+    <div class="sort-hint">Click any column header to sort &nbsp;·&nbsp; click again to reverse</div>
     <div class="tbl-wrap">{stats_table}</div>
   </div>
 </div>
@@ -857,6 +866,56 @@ function showSection(id){{
   document.getElementById('s-'+id).classList.add('active');
   event.target.classList.add('active');
 }}
+
+// ── Table sort ────────────────────────────────────────────────────────────────
+(function(){{
+  // Track sort state per table: {{ colIdx, dir }}
+  const state = {{}};
+
+  window.sortTable = function(colIdx, dtype) {{
+    const tbl  = document.getElementById('overview-table');
+    const tbody = tbl.querySelector('tbody');
+    const ths   = tbl.querySelectorAll('thead th');
+    const key   = 'overview-table';
+
+    // Toggle direction
+    let dir = 'asc';
+    if (state[key] && state[key].col === colIdx) {{
+      dir = state[key].dir === 'asc' ? 'desc' : 'asc';
+    }}
+    state[key] = {{ col: colIdx, dir }};
+
+    // Update header arrows
+    ths.forEach((th, i) => {{
+      th.classList.remove('sort-asc', 'sort-desc');
+      if (i === colIdx) th.classList.add(dir === 'asc' ? 'sort-asc' : 'sort-desc');
+    }});
+
+    // Sort rows
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    const EMPTY = dir === 'asc' ? '\\uFFFF' : '';   // empty/NaN goes last on asc, first on desc
+
+    rows.sort((a, b) => {{
+      const av = a.cells[colIdx]?.dataset.val ?? '';
+      const bv = b.cells[colIdx]?.dataset.val ?? '';
+
+      // Push empties to the bottom regardless of direction
+      if (av === '' && bv === '') return 0;
+      if (av === '') return 1;
+      if (bv === '') return -1;
+
+      let cmp;
+      if (dtype === 'num') {{
+        cmp = parseFloat(av) - parseFloat(bv);
+      }} else {{
+        cmp = av.localeCompare(bv, undefined, {{ numeric: true, sensitivity: 'base' }});
+      }}
+      return dir === 'asc' ? cmp : -cmp;
+    }});
+
+    rows.forEach(r => tbody.appendChild(r));
+  }};
+}})();
 </script>
 </body>
 </html>
@@ -893,35 +952,57 @@ def _df_to_html_table(profile: pd.DataFrame, css_class: str = "stats") -> str:
     miss_css = {c: ("m-danger" if v > 20 else "m-warn" if v > 5 else "m-ok")
                 for c, v in profile["pct_missing"].items()} if "pct_missing" in profile.columns else {}
 
-    html = [f'<table class="{css_class}"><thead><tr>',
-            "<th>column</th>"]
-    for c in cols:
-        html.append(f"<th>{c}</th>")
+    # Numeric cols get raw float for sort; others sort as string
+    numeric_stat_cols = {
+        "n_missing","pct_missing","n_unique","pct_unique","pct_mode",
+        "mean","std","min","p01","p05","p25","p50","p75","p95","p99","max",
+        "range","iqr","cv","skewness","excess_kurtosis",
+        "pct_zero","pct_negative","pct_positive",
+        "n_outlier_iqr","n_outlier_zscore","normality_p",
+        "avg_str_len","min_str_len","max_str_len",
+        "dt_range_days","dt_most_common_year","dt_weekend_pct",
+    }
+
+    html = [f'<table class="{css_class}" id="overview-table"><thead><tr>',
+            '<th onclick="sortTable(0,\'str\')" data-col="0">column</th>']
+    for idx, c in enumerate(cols, start=1):
+        dtype_flag = "num" if c in numeric_stat_cols else "str"
+        html.append(f'<th onclick="sortTable({idx},\'{dtype_flag}\')" data-col="{idx}">{c}</th>')
     html.append("</tr></thead><tbody>")
 
     for col, row in disp.iterrows():
-        html.append(f"<tr><td><strong>{col}</strong></td>")
+        html.append(f'<tr><td data-val="{col}"><strong>{col}</strong></td>')
         for c in cols:
             v = row[c]
             td_class = ""
             if c == "pct_missing" and col in miss_css:
                 td_class = f' class="{miss_css[col]}"'
+
+            # Raw value stored in data-val for sorting (NaN → empty string sorts last)
             if pd.isna(v):
-                cell = "—"
+                raw_val = ""
+                cell    = "—"
             elif c == "inferred_type":
+                raw_val  = str(v)
                 pill_cls = type_pill.get(str(v), "pill-string")
-                cell = f'<span class="pill {pill_cls}">{v}</span>'
+                cell     = f'<span class="pill {pill_cls}">{v}</span>'
             elif c in ("pct_missing", "pct_unique", "pct_mode"):
-                cell = f"{float(v):.2f}%"
+                raw_val = str(float(v))
+                cell    = f"{float(v):.2f}%"
             elif c in ("mean","std","skewness","excess_kurtosis","normality_p","cv"):
-                cell = f"{float(v):.4f}"
+                raw_val = str(float(v))
+                cell    = f"{float(v):.4f}"
             elif c in ("min","p25","p50","p75","max","p01","p99"):
-                cell = f"{float(v):.4g}"
+                raw_val = str(float(v))
+                cell    = f"{float(v):.4g}"
             elif c in ("dt_min","dt_max"):
-                cell = str(v)[:10]
+                raw_val = str(v)[:10]
+                cell    = raw_val
             else:
-                cell = str(v)
-            html.append(f"<td{td_class}>{cell}</td>")
+                raw_val = str(v)
+                cell    = raw_val
+
+            html.append(f'<td{td_class} data-val="{raw_val}">{cell}</td>')
         html.append("</tr>")
     html.append("</tbody></table>")
     return "".join(html)

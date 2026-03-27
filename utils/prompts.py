@@ -59,3 +59,26 @@ if __name__ == "__main__":
 
     import json
     result = json.loads(response.content[0].text)
+    
+    
+
+import tiktoken
+def estimate_batch_size(
+    records: list[dict],
+    token_budget: int = 6_000,   # headroom for prompt + response
+    sample_n: int = 20,
+) -> int:
+    """
+    CHOOSE BATCH SIZE BASED ON TOKEN LIMITATIONS
+    """
+    enc     = tiktoken.get_encoding("cl100k_base")
+    sample  = records[:sample_n]
+    avg_tok = len(enc.encode(json.dumps(sample, default=str))) / sample_n
+    return max(1, int(token_budget // avg_tok))
+
+batch_size = estimate_batch_size(lookup_records)
+print(f"Recommended batch size: {batch_size}")
+
+def batch_records(records: list[dict], batch_size: int):
+    for i in range(0, len(records), batch_size):
+        yield records[i : i + batch_size]

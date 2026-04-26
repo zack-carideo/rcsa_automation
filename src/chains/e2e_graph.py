@@ -6,6 +6,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import List, Optional
 
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
@@ -35,6 +36,21 @@ else:
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
 
+# Minimum fraction of key input terms that must appear in qc_output.
+_GROUNDING_THRESHOLD = 0.3
+
+# Common English words excluded from key-term extraction.
+_STOP_WORDS = frozenset({
+    "about", "above", "after", "also", "among", "and", "another", "any", "are",
+    "been", "being", "both", "by", "can", "does", "each", "every", "for",
+    "from", "have", "having", "here", "how", "into", "its", "itself", "just",
+    "more", "most", "must", "not", "now", "only", "or", "other", "our", "out",
+    "over", "same", "should", "some", "such", "than", "that", "the", "their",
+    "them", "then", "there", "these", "they", "this", "those", "through",
+    "under", "used", "very", "was", "were", "what", "when", "where", "which",
+    "while", "who", "will", "with", "would",
+})
+
 
 # ── Pydantic models ─────────────────────────────────────────────────────
 class ControlRecord(BaseModel):
@@ -42,11 +58,22 @@ class ControlRecord(BaseModel):
     control_description: str = Field(min_length=1)
 
 
+class GroundingResult(BaseModel):
+    """Tracks how well a qc_output references key terms from its input record."""
+    is_grounded: bool
+    risk_term_coverage: float = Field(ge=0.0, le=1.0)
+    control_term_coverage: float = Field(ge=0.0, le=1.0)
+    missing_risk_terms: List[str] = Field(default_factory=list)
+    missing_control_terms: List[str] = Field(default_factory=list)
+    threshold: float = Field(default=_GROUNDING_THRESHOLD, ge=0.0, le=1.0)
+
+
 class QCResult(BaseModel):
     record: ControlRecord
     qc_output: str
     overall_assessment: str  # MEETS | PARTIALLY MEETS | DOES NOT MEET
     pptx_path: str = ""
+    grounding: Optional[GroundingResult] = None
 
 
 # ── Graph state ──────────────────────────────────────────────────────────
@@ -69,6 +96,26 @@ def _parse_overall(text: str) -> str:
 
 def _get_config(state: GraphState) -> RunConfig:
     return state.get("config") or RunConfig()
+
+
+def _extract_key_terms(text: str) -> List[str]:
+    """Return deduplicated lowercase tokens (>3 chars, not stop words) from text."""
+    seen: set = set()
+    result = []
+    for token in re.findall(r"[a-zA-Z][a-zA-Z']*", text.lower()):
+        if len(token) > 3 and token not in _STOP_WORDS and token not in seen:
+            seen.add(token)
+            result.append(token)
+    return result
+
+
+def _compute_coverage(terms: List[str], text: str) -> tuple:
+    """Return (coverage_fraction, missing_terms) for terms vs. text."""
+    if not terms:
+        return 1.0, []
+    text_lower = text.lower()
+    missing = [t for t in terms if t not in text_lower]
+    return 1.0 - len(missing) / len(terms), missing
 
 
 # ── Node functions ───────────────────────────────────────────────────────
@@ -105,19 +152,54 @@ def evaluate_controls(state: GraphState) -> dict:
     return {"qc_results": results}
 
 
+def check_grounding(state: GraphState) -> dict:
+    """Verify each qc_output references key terms from its input record.
+
+    Uses token-overlap against _GROUNDING_THRESHOLD for both risk and control
+    descriptions. Records that fall below the threshold are flagged so downstream
+    nodes (aggregate_results) can surface grounding warnings in summary outputs.
+    """
+    updated = []
+    for qc in state["qc_results"]:
+        risk_terms = _extract_key_terms(qc.record.risk_description)
+        control_terms = _extract_key_terms(qc.record.control_description)
+
+        risk_cov, missing_risk = _compute_coverage(risk_terms, qc.qc_output)
+        ctrl_cov, missing_ctrl = _compute_coverage(control_terms, qc.qc_output)
+
+        grounding = GroundingResult(
+            is_grounded=risk_cov >= _GROUNDING_THRESHOLD and ctrl_cov >= _GROUNDING_THRESHOLD,
+            risk_term_coverage=round(risk_cov, 3),
+            control_term_coverage=round(ctrl_cov, 3),
+            missing_risk_terms=missing_risk[:10],
+            missing_control_terms=missing_ctrl[:10],
+            threshold=_GROUNDING_THRESHOLD,
+        )
+        updated.append(qc.model_copy(update={"grounding": grounding}))
+    return {"qc_results": updated}
+
+
 def aggregate_results(state: GraphState) -> dict:
     """Aggregate QC results into a summary report."""
     cfg = _get_config(state)
     results = state["qc_results"]
     total = len(results)
     passed = sum(1 for r in results if r.overall_assessment == "MEETS")
+    grounding_failures = sum(
+        1 for r in results if r.grounding is not None and not r.grounding.is_grounded
+    )
     summary = {
         "total": total,
         "passed": passed,
         "failed": total - passed,
         "pass_rate": f"{passed / total:.0%}" if total else "N/A",
+        "grounding_failures": grounding_failures,
         "details": [
-            {"control": r.record.control_description[:80], "assessment": r.overall_assessment}
+            {
+                "control": r.record.control_description[:80],
+                "assessment": r.overall_assessment,
+                "grounded": r.grounding.is_grounded if r.grounding else None,
+            }
             for r in results
         ],
     }
@@ -126,7 +208,7 @@ def aggregate_results(state: GraphState) -> dict:
     if cfg.save_summary:
         (out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
-    # Save full results: per-record QC output + metadata
+    # Save full results: per-record QC output + metadata + grounding
     full_results = []
     for i, r in enumerate(results):
         entry = {
@@ -135,6 +217,7 @@ def aggregate_results(state: GraphState) -> dict:
             "control_description": r.record.control_description,
             "overall_assessment": r.overall_assessment,
             "qc_output": r.qc_output,
+            "grounding": r.grounding.model_dump() if r.grounding else None,
         }
         full_results.append(entry)
     (out_dir / "full_results.json").write_text(json.dumps(full_results, indent=2), encoding="utf-8")
@@ -176,12 +259,14 @@ def build_graph():
 
     g.add_node("validate_input", validate_input)
     g.add_node("evaluate_controls", evaluate_controls)
+    g.add_node("check_grounding", check_grounding)
     g.add_node("aggregate_results", aggregate_results)
     g.add_node("build_presentations", build_presentations)
 
     g.add_edge(START, "validate_input")
     g.add_edge("validate_input", "evaluate_controls")
-    g.add_edge("evaluate_controls", "aggregate_results")
+    g.add_edge("evaluate_controls", "check_grounding")
+    g.add_edge("check_grounding", "aggregate_results")
     g.add_conditional_edges(
         "aggregate_results",
         _route_after_aggregate,
